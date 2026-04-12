@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 import os
+import tempfile
 import pandas as pd
 from datetime import datetime
 from audio_recorder_streamlit import audio_recorder
@@ -66,6 +67,18 @@ section[data-testid="stSidebar"] {
 }
 .hero p { color: rgba(255,255,255,0.8); font-size: 16px; margin: 0; }
 
+.speed-badge {
+    display: inline-block;
+    background: rgba(6,214,160,0.15);
+    border: 1px solid #06D6A0;
+    color: #06D6A0;
+    border-radius: 20px;
+    padding: 2px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-left: 8px;
+}
+
 .person-panel {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -103,6 +116,12 @@ section[data-testid="stSidebar"] {
     margin: 0.5rem 0;
 }
 
+.timing-info {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 0.3rem;
+}
+
 .conv-bubble-a {
     background: rgba(255,107,53,0.12);
     border-left: 3px solid #FF6B35;
@@ -121,6 +140,24 @@ section[data-testid="stSidebar"] {
 .bubble-meta { font-size: 12px; color: var(--muted); margin-bottom: 0.2rem; }
 .bubble-original { font-size: 14px; color: var(--muted); }
 .bubble-translated { font-size: 15px; color: var(--text); font-weight: 500; }
+
+.engine-tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    margin-left: 6px;
+}
+.engine-whisper {
+    background: rgba(255,209,102,0.15);
+    border: 1px solid #FFD166;
+    color: #FFD166;
+}
+.engine-transcribe {
+    background: rgba(0,78,137,0.2);
+    border: 1px solid #59A5D8;
+    color: #59A5D8;
+}
 
 .stButton > button {
     background: linear-gradient(135deg, #FF6B35, #e8541f);
@@ -150,38 +187,63 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET  = os.environ.get("INPUT_BUCKET", "translation-app-input-2026")
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
-transcribe_client = boto3.client("transcribe", region_name=AWS_REGION)
 translate_client  = boto3.client("translate",  region_name=AWS_REGION)
 polly_client      = boto3.client("polly",      region_name=AWS_REGION)
+transcribe_client = boto3.client("transcribe", region_name=AWS_REGION)
 s3_client         = boto3.client("s3",         region_name=AWS_REGION)
+
+# ── Load Whisper model once (cached so it only loads on first run) ────────────
+@st.cache_resource(show_spinner="Loading Whisper model (one-time setup)...")
+def load_whisper():
+    try:
+        import whisper
+        model = whisper.load_model("base")
+        return model
+    except Exception as e:
+        return None
+
+whisper_model = load_whisper()
 
 # ── Languages ─────────────────────────────────────────────────────────────────
 LANGUAGES = {
-    "English":    {"translate": "en", "transcribe": "en-US", "polly": "Joanna"},
-    "Spanish":    {"translate": "es", "transcribe": "es-US", "polly": "Lupe"},
-    "French":     {"translate": "fr", "transcribe": "fr-FR", "polly": "Lea"},
-    "German":     {"translate": "de", "transcribe": "de-DE", "polly": "Vicki"},
-    "Italian":    {"translate": "it", "transcribe": "it-IT", "polly": "Bianca"},
-    "Portuguese": {"translate": "pt", "transcribe": "pt-BR", "polly": "Camila"},
-    "Japanese":   {"translate": "ja", "transcribe": "ja-JP", "polly": "Mizuki"},
-    "Korean":     {"translate": "ko", "transcribe": "ko-KR", "polly": "Seoyeon"},
-    "Hindi":      {"translate": "hi", "transcribe": "hi-IN", "polly": "Aditi"},
-    "Arabic":     {"translate": "ar", "transcribe": "ar-SA", "polly": "Zeina"},
-    "Dutch":      {"translate": "nl", "transcribe": "nl-NL", "polly": "Laura"},
-    "Turkish":    {"translate": "tr", "transcribe": "tr-TR", "polly": "Filiz"},
-    "Swahili":    {"translate": "sw", "transcribe": "sw-KE", "polly": None},
+    "English":    {"translate": "en", "transcribe": "en-US", "whisper": "en",  "polly": "Joanna"},
+    "Spanish":    {"translate": "es", "transcribe": "es-US", "whisper": "es",  "polly": "Lupe"},
+    "French":     {"translate": "fr", "transcribe": "fr-FR", "whisper": "fr",  "polly": "Lea"},
+    "German":     {"translate": "de", "transcribe": "de-DE", "whisper": "de",  "polly": "Vicki"},
+    "Italian":    {"translate": "it", "transcribe": "it-IT", "whisper": "it",  "polly": "Bianca"},
+    "Portuguese": {"translate": "pt", "transcribe": "pt-BR", "whisper": "pt",  "polly": "Camila"},
+    "Japanese":   {"translate": "ja", "transcribe": "ja-JP", "whisper": "ja",  "polly": "Mizuki"},
+    "Korean":     {"translate": "ko", "transcribe": "ko-KR", "whisper": "ko",  "polly": "Seoyeon"},
+    "Hindi":      {"translate": "hi", "transcribe": "hi-IN", "whisper": "hi",  "polly": "Aditi"},
+    "Arabic":     {"translate": "ar", "transcribe": "ar-SA", "whisper": "ar",  "polly": "Zeina"},
+    "Dutch":      {"translate": "nl", "transcribe": "nl-NL", "whisper": "nl",  "polly": "Laura"},
+    "Turkish":    {"translate": "tr", "transcribe": "tr-TR", "whisper": "tr",  "polly": "Filiz"},
+    "Swahili":    {"translate": "sw", "transcribe": "sw-KE", "whisper": "sw",  "polly": None},
 }
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "conversation" not in st.session_state:
     st.session_state.conversation = []
+if "total_time" not in st.session_state:
+    st.session_state.total_time = []
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def upload_audio_to_s3(audio_bytes, filename):
-    s3_client.put_object(Bucket=S3_BUCKET, Key=f"audio/{filename}", Body=audio_bytes)
-    return f"s3://{S3_BUCKET}/audio/{filename}"
+def transcribe_with_whisper(audio_bytes, language_code):
+    """Fast local transcription using Whisper (~1-2 seconds)."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        tmp_path = f.name
+    try:
+        result = whisper_model.transcribe(tmp_path, language=language_code, fp16=False)
+        return result["text"].strip()
+    finally:
+        os.unlink(tmp_path)
 
-def transcribe_audio(s3_uri, language_code, job_name):
+def transcribe_with_aws(audio_bytes, language_code, job_name):
+    """Fallback: AWS Transcribe (~15-30 seconds)."""
+    filename = f"{job_name}.wav"
+    s3_client.put_object(Bucket=S3_BUCKET, Key=f"audio/{filename}", Body=audio_bytes)
+    s3_uri = f"s3://{S3_BUCKET}/audio/{filename}"
     transcribe_client.start_transcription_job(
         TranscriptionJobName=job_name,
         Media={"MediaFileUri": s3_uri},
@@ -195,8 +257,8 @@ def transcribe_audio(s3_uri, language_code, job_name):
         status = response["TranscriptionJob"]["TranscriptionJobStatus"]
         if status == "COMPLETED":
             obj = s3_client.get_object(Bucket=S3_BUCKET, Key=f"transcripts/{job_name}.json")
-            transcript_json = json.loads(obj["Body"].read())
-            return transcript_json["results"]["transcripts"][0]["transcript"]
+            data = json.loads(obj["Body"].read())
+            return data["results"]["transcripts"][0]["transcript"]
         elif status == "FAILED":
             return None
         time.sleep(2)
@@ -214,44 +276,82 @@ def speak_translation(text, voice_id):
     neural_voices = ["Joanna", "Lupe", "Lea", "Vicki", "Laura", "Seoyeon"]
     engine = "neural" if voice_id in neural_voices else "standard"
     response = polly_client.synthesize_speech(
-        Text=text,
-        OutputFormat="mp3",
-        VoiceId=voice_id,
-        Engine=engine,
+        Text=text, OutputFormat="mp3",
+        VoiceId=voice_id, Engine=engine,
     )
     return response["AudioStream"].read()
 
 def process_audio(audio_bytes, speaker_name, src_lang_name, tgt_lang_name):
+    """
+    Full pipeline with timing:
+    1. Whisper transcription (fast, local)
+    2. Fallback to AWS Transcribe if Whisper fails
+    3. AWS Translate
+    4. AWS Polly
+    """
     src = LANGUAGES[src_lang_name]
     tgt = LANGUAGES[tgt_lang_name]
     job_name = f"lingua-{uuid.uuid4().hex[:12]}"
-    filename = f"{job_name}.wav"
-    progress = st.progress(0, text="Uploading audio...")
-    try:
-        s3_uri = upload_audio_to_s3(audio_bytes, filename)
-        progress.progress(25, text="Transcribing speech...")
-        transcript = transcribe_audio(s3_uri, src["transcribe"], job_name)
-        if not transcript:
-            st.error("Transcription failed. Please try again.")
+    total_start = time.time()
+    engine_used = "whisper"
+
+    progress = st.progress(0, text="Starting transcription...")
+
+    # ── Step 1: Transcribe ────────────────────────────────────────────────────
+    transcript = None
+    t0 = time.time()
+
+    if whisper_model:
+        try:
+            progress.progress(10, text="Transcribing with Whisper (fast)...")
+            transcript = transcribe_with_whisper(audio_bytes, src["whisper"])
+            transcribe_time = round(time.time() - t0, 1)
+            engine_used = "whisper"
+        except Exception as e:
+            transcript = None
+
+    if not transcript:
+        try:
+            progress.progress(10, text="Transcribing with AWS Transcribe (fallback)...")
+            transcript = transcribe_with_aws(audio_bytes, src["transcribe"], job_name)
+            transcribe_time = round(time.time() - t0, 1)
+            engine_used = "transcribe"
+        except Exception:
             progress.empty()
-            return None, None, None
-        progress.progress(65, text="Translating...")
-        translated = translate_text(transcript, src["translate"], tgt["translate"])
-        audio_out = None
-        if tgt["polly"]:
-            progress.progress(85, text="Generating speech...")
-            try:
-                audio_out = speak_translation(translated, tgt["polly"])
-            except Exception:
-                pass
-        progress.progress(100, text="Done!")
-        time.sleep(0.4)
+            st.error("Transcription failed. Please try again.")
+            return None, None, None, None, None
+
+    if not transcript:
         progress.empty()
-        return transcript, translated, audio_out
+        st.error("Could not transcribe audio. Please speak clearly and try again.")
+        return None, None, None, None, None
+
+    # ── Step 2: Translate ─────────────────────────────────────────────────────
+    progress.progress(70, text="Translating...")
+    t1 = time.time()
+    try:
+        translated = translate_text(transcript, src["translate"], tgt["translate"])
+        translate_time = round(time.time() - t1, 1)
     except Exception as e:
         progress.empty()
-        st.error(f"Error: {str(e)}")
-        return None, None, None
+        st.error(f"Translation failed: {str(e)}")
+        return None, None, None, None, None
+
+    # ── Step 3: Speak ─────────────────────────────────────────────────────────
+    audio_out = None
+    if tgt["polly"]:
+        progress.progress(90, text="Generating speech...")
+        try:
+            audio_out = speak_translation(translated, tgt["polly"])
+        except Exception:
+            pass
+
+    total_time = round(time.time() - total_start, 1)
+    progress.progress(100, text=f"Done in {total_time}s!")
+    time.sleep(0.5)
+    progress.empty()
+
+    return transcript, translated, audio_out, engine_used, total_time
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -271,21 +371,48 @@ with st.sidebar:
     lang_b = st.selectbox("Speaks", list(LANGUAGES.keys()), index=1, key="lang_b")
 
     st.markdown("---")
+
+    # Engine status
+    if whisper_model:
+        st.markdown("""
+        <div style='background:rgba(6,214,160,0.1); border:1px solid #06D6A0; border-radius:8px; padding:0.6rem 1rem; font-size:13px;'>
+        ⚡ <b style='color:#06D6A0;'>Whisper Active</b><br>
+        <span style='color:#8B8FA8;'>Fast local transcription</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style='background:rgba(255,209,102,0.1); border:1px solid #FFD166; border-radius:8px; padding:0.6rem 1rem; font-size:13px;'>
+        ⚠️ <b style='color:#FFD166;'>AWS Transcribe Mode</b><br>
+        <span style='color:#8B8FA8;'>Install whisper for faster speed</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Performance stats
+    if st.session_state.total_time:
+        avg = round(sum(st.session_state.total_time) / len(st.session_state.total_time), 1)
+        best = min(st.session_state.total_time)
+        st.markdown(f"""
+        <div style='color:#8B8FA8; font-size:13px;'>
+        ⚡ <b>Avg speed:</b> {avg}s<br>
+        🏆 <b>Best:</b> {best}s<br>
+        💬 <b>Exchanges:</b> {len(st.session_state.conversation)}
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
     if st.button("Clear Conversation"):
         st.session_state.conversation = []
+        st.session_state.total_time = []
         st.rerun()
-
-    st.markdown(f"""
-    <div style='color:#8B8FA8; font-size:13px; margin-top:1rem;'>
-    💬 Exchanges so far: <b>{len(st.session_state.conversation)}</b>
-    </div>
-    """, unsafe_allow_html=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class='hero'>
-    <h1>Live Audio Conversation</h1>
-    <p>Speak in your language — hear the reply in theirs. Powered by AWS Transcribe, Translate and Polly.</p>
+    <h1>Live Audio Conversation <span class='speed-badge'>⚡ Whisper Powered</span></h1>
+    <p>Speak in your language — hear the reply in theirs. Local Whisper transcription for near-instant results.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -311,20 +438,25 @@ with col_a:
         neutral_color="#8B8FA8", icon_size="2x", key="recorder_a"
     )
     if audio_a:
-        transcript_a, translated_a, audio_out_a = process_audio(audio_a, person_a_name, lang_a, lang_b)
+        result = process_audio(audio_a, person_a_name, lang_a, lang_b)
+        transcript_a, translated_a, audio_out_a, engine_a, total_a = result
         if transcript_a:
-            st.markdown("**You said:**")
+            engine_tag = f"<span class='engine-tag engine-{engine_a}'>{'⚡ Whisper' if engine_a == 'whisper' else '☁️ AWS Transcribe'}</span>"
+            st.markdown(f"**You said:** {engine_tag}", unsafe_allow_html=True)
             st.markdown(f"<div class='transcript-box'>{transcript_a}</div>", unsafe_allow_html=True)
             st.markdown(f"**In {lang_b}:**")
             st.markdown(f"<div class='translation-box'>{translated_a}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='timing-info'>Completed in {total_a}s</div>", unsafe_allow_html=True)
             if audio_out_a:
                 st.audio(audio_out_a, format="audio/mp3")
             st.session_state.conversation.append({
                 "speaker": person_a_name, "type": "a",
                 "original": transcript_a, "translated": translated_a,
                 "src_lang": lang_a, "tgt_lang": lang_b,
+                "engine": engine_a, "time_taken": total_a,
                 "time": datetime.now().strftime("%H:%M:%S"),
             })
+            st.session_state.total_time.append(total_a)
             st.rerun()
 
 # ── Person B ──────────────────────────────────────────────────────────────────
@@ -337,20 +469,25 @@ with col_b:
         neutral_color="#8B8FA8", icon_size="2x", key="recorder_b"
     )
     if audio_b:
-        transcript_b, translated_b, audio_out_b = process_audio(audio_b, person_b_name, lang_b, lang_a)
+        result = process_audio(audio_b, person_b_name, lang_b, lang_a)
+        transcript_b, translated_b, audio_out_b, engine_b, total_b = result
         if transcript_b:
-            st.markdown("**You said:**")
+            engine_tag = f"<span class='engine-tag engine-{engine_b}'>{'⚡ Whisper' if engine_b == 'whisper' else '☁️ AWS Transcribe'}</span>"
+            st.markdown(f"**You said:** {engine_tag}", unsafe_allow_html=True)
             st.markdown(f"<div class='transcript-box'>{transcript_b}</div>", unsafe_allow_html=True)
             st.markdown(f"**In {lang_a}:**")
             st.markdown(f"<div class='translation-box'>{translated_b}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='timing-info'>Completed in {total_b}s</div>", unsafe_allow_html=True)
             if audio_out_b:
                 st.audio(audio_out_b, format="audio/mp3")
             st.session_state.conversation.append({
                 "speaker": person_b_name, "type": "b",
                 "original": transcript_b, "translated": translated_b,
                 "src_lang": lang_b, "tgt_lang": lang_a,
+                "engine": engine_b, "time_taken": total_b,
                 "time": datetime.now().strftime("%H:%M:%S"),
             })
+            st.session_state.total_time.append(total_b)
             st.rerun()
 
 # ── Conversation log ──────────────────────────────────────────────────────────
@@ -359,10 +496,11 @@ if st.session_state.conversation:
     st.markdown("<div style='font-family:Syne,sans-serif; font-size:1.1rem; font-weight:700; color:#FF6B35; margin-bottom:1rem;'>💬 Conversation Log</div>", unsafe_allow_html=True)
 
     for entry in st.session_state.conversation:
+        engine_label = "⚡ Whisper" if entry.get("engine") == "whisper" else "☁️ AWS"
         if entry["type"] == "a":
             st.markdown(f"""
             <div class='conv-bubble-a'>
-                <div class='bubble-meta'>🟠 {entry['speaker']} · {entry['time']} · {entry['src_lang']} → {entry['tgt_lang']}</div>
+                <div class='bubble-meta'>🟠 {entry['speaker']} · {entry['time']} · {entry['src_lang']} → {entry['tgt_lang']} · {engine_label} · {entry.get('time_taken', '?')}s</div>
                 <div class='bubble-original'>"{entry['original']}"</div>
                 <div class='bubble-translated'>→ {entry['translated']}</div>
             </div>
@@ -370,7 +508,7 @@ if st.session_state.conversation:
         else:
             st.markdown(f"""
             <div class='conv-bubble-b'>
-                <div class='bubble-meta'>🔵 {entry['speaker']} · {entry['time']} · {entry['src_lang']} → {entry['tgt_lang']}</div>
+                <div class='bubble-meta'>🔵 {entry['speaker']} · {entry['time']} · {entry['src_lang']} → {entry['tgt_lang']} · {engine_label} · {entry.get('time_taken', '?')}s</div>
                 <div class='bubble-original'>"{entry['original']}"</div>
                 <div class='bubble-translated'>→ {entry['translated']}</div>
             </div>
